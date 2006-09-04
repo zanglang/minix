@@ -1,0 +1,408 @@
+Common subdirectories: /usr/src/servers/ds and /home/src/servers/ds
+Only in /home/src/servers/ds: ds
+Only in /home/src/servers/ds: main.o
+Only in /home/src/servers/ds: store.o
+Common subdirectories: /usr/src/servers/fs and /home/src/servers/fs
+Only in /home/src/servers/fs: cache.o
+Only in /home/src/servers/fs: cache2.o
+Only in /home/src/servers/fs: cdprobe.o
+Only in /home/src/servers/fs: device.o
+Only in /home/src/servers/fs: dmap.o
+Only in /home/src/servers/fs: filedes.o
+Only in /home/src/servers/fs: fs
+diff -c /usr/src/servers/fs/inode.h /home/src/servers/fs/inode.h
+*** /usr/src/servers/fs/inode.h Mon Aug 29 16:47:18 2005
+--- /home/src/servers/fs/inode.h Fri Jun  2 16:11:04 2006
+***************
+*** 35,40 ****
+--- 35,42 ----
+  
+  #define NIL_INODE (struct inode *) 0	/* indicates absence of inode slot */
+  
++ #define I_IMMEDIATE     0120000	/* Added: identifies the inode as a immediate container */
++ 
+  /* Field values.  Note that CLEAN and DIRTY are defined in "const.h" */
+  #define NO_PIPE            0	/* i_pipe is NO_PIPE if inode is not a pipe */
+  #define I_PIPE             1	/* i_pipe is I_PIPE if inode is a pipe */
+Only in /home/src/servers/fs: inode.o
+Only in /home/src/servers/fs: link.o
+diff -c /usr/src/servers/fs/lock.c /home/src/servers/fs/lock.c
+*** /usr/src/servers/fs/lock.c Thu Apr 21 14:56:43 2005
+--- /home/src/servers/fs/lock.c Fri Jun  2 16:11:06 2006
+***************
+*** 42,48 ****
+    mo = f->filp_mode;
+    if (ltype != F_UNLCK && ltype != F_RDLCK && ltype != F_WRLCK) return(EINVAL);
+    if (req == F_GETLK && ltype == F_UNLCK) return(EINVAL);
+!   if ( (f->filp_ino->i_mode & I_TYPE) != I_REGULAR) return(EINVAL);
+    if (req != F_GETLK && ltype == F_RDLCK && (mo & R_BIT) == 0) return(EBADF);
+    if (req != F_GETLK && ltype == F_WRLCK && (mo & W_BIT) == 0) return(EBADF);
+  
+--- 42,49 ----
+    mo = f->filp_mode;
+    if (ltype != F_UNLCK && ltype != F_RDLCK && ltype != F_WRLCK) return(EINVAL);
+    if (req == F_GETLK && ltype == F_UNLCK) return(EINVAL);
+!   /* check for non regular nor immediate files */
+!   if ( (f->filp_ino->i_mode & I_TYPE) != I_REGULAR && (f->filp_ino->i_mode & I_TYPE) != I_IMMEDIATE) return(EINVAL);
+    if (req != F_GETLK && ltype == F_RDLCK && (mo & R_BIT) == 0) return(EBADF);
+    if (req != F_GETLK && ltype == F_WRLCK && (mo & W_BIT) == 0) return(EBADF);
+  
+Only in /home/src/servers/fs: lock.o
+Only in /home/src/servers/fs: main.o
+Only in /home/src/servers/fs: misc.o
+Only in /home/src/servers/fs: mount.o
+diff -c /usr/src/servers/fs/open.c /home/src/servers/fs/open.c
+*** /usr/src/servers/fs/open.c Mon Aug 29 16:47:18 2005
+--- /home/src/servers/fs/open.c Fri Jun  2 16:11:09 2006
+***************
+*** 91,97 ****
+    /* If O_CREATE is set, try to make the file. */ 
+    if (oflags & O_CREAT) {
+    	/* Create a new inode by calling new_node(). */
+!         omode = I_REGULAR | (omode & ALL_MODES & fp->fp_umask);
+      	rip = new_node(user_path, omode, NO_ZONE);
+      	r = err_code;
+      	if (r == OK) exist = FALSE;      /* we just created the file */
+--- 91,98 ----
+    /* If O_CREATE is set, try to make the file. */ 
+    if (oflags & O_CREAT) {
+    	/* Create a new inode by calling new_node(). */
+! 	/* Inodes are immediate by default */
+!         omode = I_IMMEDIATE | (omode & ALL_MODES & fp->fp_umask);
+      	rip = new_node(user_path, omode, NO_ZONE);
+      	r = err_code;
+      	if (r == OK) exist = FALSE;      /* we just created the file */
+***************
+*** 115,126 ****
+    	if ((r = forbidden(rip, bits)) == OK) {
+    		/* Opening reg. files directories and special files differ. */
+  	  	switch (rip->i_mode & I_TYPE) {
+!     		   case I_REGULAR: 
+  			/* Truncate regular file if O_TRUNC. */
+  			if (oflags & O_TRUNC) {
+  				if ((r = forbidden(rip, W_BIT)) !=OK) break;
+  				truncate(rip);
+  				wipe_inode(rip);
+  				/* Send the inode from the inode cache to the
+  				 * block cache, so it gets written on the next
+  				 * cache flush.
+--- 116,131 ----
+    	if ((r = forbidden(rip, bits)) == OK) {
+    		/* Opening reg. files directories and special files differ. */
+  	  	switch (rip->i_mode & I_TYPE) {
+! 		case I_REGULAR:
+! 		case I_IMMEDIATE:
+  			/* Truncate regular file if O_TRUNC. */
+  			if (oflags & O_TRUNC) {
+  				if ((r = forbidden(rip, W_BIT)) !=OK) break;
+  				truncate(rip);
+  				wipe_inode(rip);
++ 				/* when truncated inodes fallback to immediate again */
++ 				if ((rip->i_mode & I_TYPE) == I_REGULAR)
++ 					rip->i_mode = I_IMMEDIATE | (rip->i_mode & ALL_MODES);
+  				/* Send the inode from the inode cache to the
+  				 * block cache, so it gets written on the next
+  				 * cache flush.
+Only in /home/src/servers/fs: open.o
+Only in /home/src/servers/fs: path.o
+Only in /home/src/servers/fs: pipe.o
+Only in /home/src/servers/fs: protect.o
+diff -c /usr/src/servers/fs/read.c /home/src/servers/fs/read.c
+*** /usr/src/servers/fs/read.c Sun Sep 11 16:45:46 2005
+--- /home/src/servers/fs/read.c Fri Jun  2 16:11:10 2006
+***************
+*** 13,18 ****
+--- 13,19 ----
+  
+  #include "fs.h"
+  #include <fcntl.h>
++ #include <string.h>
+  #include <minix/com.h>
+  #include "buf.h"
+  #include "file.h"
+***************
+*** 24,29 ****
+--- 25,32 ----
+  FORWARD _PROTOTYPE( int rw_chunk, (struct inode *rip, off_t position,
+  	unsigned off, int chunk, unsigned left, int rw_flag,
+  	char *buff, int seg, int usr, int block_size, int *completed));
++ FORWARD _PROTOTYPE( int rw_izone, (struct inode *rip, unsigned off,
++ 	int bytes, int rw_flag, char *buff, int seg, int usr));
+  
+  /*===========================================================================*
+   *				do_read					     *
+***************
+*** 98,104 ****
+    }
+    op = (rw_flag == READING ? DEV_READ : DEV_WRITE);
+    mode_word = rip->i_mode & I_TYPE;
+!   regular = mode_word == I_REGULAR || mode_word == I_NAMED_PIPE;
+  
+    if ((char_spec = (mode_word == I_CHAR_SPECIAL ? 1 : 0))) {
+    	if (rip->i_zone[0] == NO_DEV)
+--- 101,108 ----
+    }
+    op = (rw_flag == READING ? DEV_READ : DEV_WRITE);
+    mode_word = rip->i_mode & I_TYPE;
+!   /* is it a regular file (immediate files are treated as regular files) */
+!   regular = mode_word == I_REGULAR || mode_word == I_IMMEDIATE || mode_word == I_NAMED_PIPE;
+  
+    if ((char_spec = (mode_word == I_CHAR_SPECIAL ? 1 : 0))) {
+    	if (rip->i_zone[0] == NO_DEV)
+***************
+*** 154,159 ****
+--- 158,254 ----
+  
+  	if (partial_cnt > 0) partial_pipe = 1;
+  
++ 	/* this is an immediate container */
++ 	if ((rip->i_mode & I_TYPE) == I_IMMEDIATE) {
++ 		int check = 0;				/* flag */
++ 		chunk = (int) m_in.nbytes;	/* bytes to write */
++ 
++ 		/* check if reading or writing */
++ 		if (rw_flag == WRITING) {
++ 			/* check the ending size after writing */
++ 			int newsize = f_size + m_in.nbytes;
++ 
++ 			/* if we're going from < 40 bytes to > 40 bytes */
++ 			if (f_size <= 40 && newsize > 40) {
++ 				int tmp_size = f_size;
++ 				int tmp_pos = 0;
++ 				char buf[40];
++ 
++ 				/* extract raw data from izone to buffer */
++ 				(void) sys_vircopy(FS_PROC_NR, D, (phys_bytes) rip->i_zone,
++ 						usr, seg, (phys_bytes) buf,
++ 						(phys_bytes) f_size);
++ 
++ 				/* raw data has been moved out, clean up inode */
++ 				wipe_inode(rip);
++ 
++ 				/* write buffer data to blocks */
++ 				/* the loop isn't quite necessary, but no harm... */
++ 				while (tmp_size != 0) {
++ 					/* calculate offset and bytes to write */
++ 					off = (unsigned int) (tmp_pos % block_size);
++ 					chunk = MIN(f_size, block_size - off);
++ 					if (chunk < 0) chunk = block_size - off;
++ 					/* initiate write */
++ 					r = rw_chunk(rip, tmp_pos, off, chunk, chunk,
++ 							 rw_flag, buf, seg, usr, block_size, &completed);
++ 					if (r != OK || rdwt_err < 0)
++ 						/* write was not successful :( */
++ 						break;
++ 					/* update total io */
++ 					cum_io += chunk;
++ 					/* update temp variables for next loop */
++ 					tmp_pos += chunk;
++ 					tmp_size -= chunk;
++ 				}
++ 				
++ 				/* update variables */
++ 				position = tmp_pos;
++ 				f_size = rip->i_size;
++ 
++ 				/* done writing, escalate to a non-immediate inode */
++ 				rip->i_mode = (I_REGULAR | (rip->i_mode & ALL_MODES));
++ 
++ 			}
++ 			/* if the ending file size will remain as < 40 bytes */
++ 			else if (f_size <= 40 && newsize <= 40) {
++ 				check = 1;
++ 			}
++ 		}
++ 		/* rw_flag == READING */
++ 		else {
++ 			/* check how many bytes can be read from this position */
++ 			bytes_left = f_size - position;
++ 			/* position is past EOF, not going to read */
++ 			if (position >= f_size)
++ 				check = 0;
++ 			else {
++ 				/* read chunk is going to go past EOF, cut down to actual bytes left */
++ 				if (chunk > bytes_left) chunk = (int) bytes_left;
++ 				check = 1;
++ 			}
++ 		}
++ 
++ 		/* done checking, read/write to inode zones */
++ 		if (check == 1) {
++ 
++ 			/* start reading/writing */
++ 			r = rw_izone(rip, position, (unsigned) chunk,
++ 				rw_flag, m_in.buffer, seg, usr);
++ 
++ 			/* if successful */
++ 			if (r == OK && rdwt_err >= 0) {
++ 				/* update counters */
++ 				m_in.buffer += m_in.nbytes;
++ 				cum_io += m_in.nbytes;
++ 				position += m_in.nbytes;
++ 
++ 				/* clear bytes left */
++ 				m_in.nbytes = 0;
++ 			}
++ 		}
++ 	}
++ 
+  	/* Split the transfer into chunks that don't span two blocks. */
+  	while (m_in.nbytes != 0) {
+  
+***************
+*** 331,336 ****
+--- 426,462 ----
+    return(r);
+  }
+  
++ /*===========================================================================*
++  *		rw_izone - handles reading and writing from immediate nodes          *
++  *===========================================================================*/
++ PRIVATE int rw_izone(rip, off, bytes, rw_flag, buff, seg, usr)
++ register struct inode *rip;	/* immediate node to read from/write to */
++ unsigned off;	/* offset within the current zone */
++ int bytes;		/* number of bytes to read or write */
++ int rw_flag;	/* READING or WRITING */
++ char *buff;		/* virtual address of the user buffer */
++ int seg;		/* T or D segment in user space */
++ int usr;		/* which user process */
++ {
++   register int r = OK;
++ 
++   if (rw_flag == READING) {
++ 	/* Copy the raw data from the immediate zone to user space */
++ 	r = sys_vircopy(FS_PROC_NR, D, (phys_bytes) ((char *)rip->i_zone + off),
++ 			usr, seg, (phys_bytes) buff,
++ 			(phys_bytes) bytes);
++   } else {
++ 	/* Copy the raw data from user space to the immediate zone */
++ 	r = sys_vircopy(usr, seg, (phys_bytes) buff,
++ 			FS_PROC_NR, D, (phys_bytes) ((char *)rip->i_zone + off),
++ 			(phys_bytes) bytes);
++ 	
++ 	/* inode has been modified, mark to write to disk later */
++ 	rip->i_dirt = DIRTY;
++   }
++ 
++   return r;
++ }
+  
+  /*===========================================================================*
+   *				read_map				     *
+***************
+*** 348,354 ****
+    int scale, boff, dzones, nr_indirects, index, zind, ex;
+    block_t b;
+    long excess, zone, block_pos;
+!   
+    scale = rip->i_sp->s_log_zone_size;	/* for block-zone conversion */
+    block_pos = position/rip->i_sp->s_block_size;	/* relative blk # in file */
+    zone = block_pos >> scale;	/* position's zone */
+--- 474,484 ----
+    int scale, boff, dzones, nr_indirects, index, zind, ex;
+    block_t b;
+    long excess, zone, block_pos;
+! 
+!   /* immediate inodes do have have any blocks */
+!   if ((rip->i_mode & I_TYPE) == I_IMMEDIATE)
+! 	  return(NO_BLOCK);
+!  
+    scale = rip->i_sp->s_log_zone_size;	/* for block-zone conversion */
+    block_pos = position/rip->i_sp->s_block_size;	/* relative blk # in file */
+    zone = block_pos >> scale;	/* position's zone */
+Only in /home/src/servers/fs: read.o
+diff -c /usr/src/servers/fs/select.c /home/src/servers/fs/select.c
+*** /usr/src/servers/fs/select.c Thu Oct 20 19:39:32 2005
+--- /home/src/servers/fs/select.c Fri Jun  2 16:11:01 2006
+***************
+*** 102,108 ****
+   *===========================================================================*/
+  PRIVATE int select_match_file(struct filp *file)
+  {
+! 	if (file && file->filp_ino && (file->filp_ino->i_mode & I_REGULAR))
+  		return 1;
+  	return 0;
+  }
+--- 102,109 ----
+   *===========================================================================*/
+  PRIVATE int select_match_file(struct filp *file)
+  {
+! 	/* allow both regular and immediate files */
+! 	if (file && file->filp_ino && (file->filp_ino->i_mode & (I_REGULAR | I_IMMEDIATE)))
+  		return 1;
+  	return 0;
+  }
+Only in /home/src/servers/fs: select.o
+Only in /home/src/servers/fs: stadir.o
+Only in /home/src/servers/fs: super.o
+Only in /home/src/servers/fs: table.o
+Only in /home/src/servers/fs: time.o
+Only in /home/src/servers/fs: timers.o
+Only in /home/src/servers/fs: utility.o
+diff -c /usr/src/servers/fs/write.c /home/src/servers/fs/write.c
+*** /usr/src/servers/fs/write.c Mon Aug 29 16:47:18 2005
+--- /home/src/servers/fs/write.c Fri Jun  2 16:11:02 2006
+***************
+*** 45,50 ****
+--- 45,54 ----
+    long excess, zone;
+    struct buf *bp;
+  
++   /* immediate inodes do have have any blocks */
++   if ((rip->i_mode & I_TYPE) == I_IMMEDIATE)
++ 	  return(NO_BLOCK);
++ 
+    rip->i_dirt = DIRTY;		/* inode will be changed */
+    bp = NIL_BUF;
+    scale = rip->i_sp->s_log_zone_size;		/* for zone-block conversion */
+Only in /home/src/servers/fs: write.o
+Common subdirectories: /usr/src/servers/inet and /home/src/servers/inet
+Only in /home/src/servers/inet: buf.o
+Only in /home/src/servers/inet: clock.o
+Common subdirectories: /usr/src/servers/inet/generic and /home/src/servers/inet/generic
+Only in /home/src/servers/inet/generic: arp.o
+Only in /home/src/servers/inet/generic: eth.o
+Only in /home/src/servers/inet/generic: event.o
+Only in /home/src/servers/inet/generic: icmp.o
+Only in /home/src/servers/inet/generic: io.o
+Only in /home/src/servers/inet/generic: ip.o
+Only in /home/src/servers/inet/generic: ip_eth.o
+Only in /home/src/servers/inet/generic: ip_ioctl.o
+Only in /home/src/servers/inet/generic: ip_lib.o
+Only in /home/src/servers/inet/generic: ip_ps.o
+Only in /home/src/servers/inet/generic: ip_read.o
+Only in /home/src/servers/inet/generic: ip_write.o
+Only in /home/src/servers/inet/generic: ipr.o
+Only in /home/src/servers/inet/generic: psip.o
+Only in /home/src/servers/inet/generic: rand256.o
+Only in /home/src/servers/inet/generic: tcp.o
+Only in /home/src/servers/inet/generic: tcp_lib.o
+Only in /home/src/servers/inet/generic: tcp_recv.o
+Only in /home/src/servers/inet/generic: tcp_send.o
+Only in /home/src/servers/inet/generic: udp.o
+Only in /home/src/servers/inet: inet
+Only in /home/src/servers/inet: inet.o
+Only in /home/src/servers/inet: inet_config.o
+Common subdirectories: /usr/src/servers/inet/minix3 and /home/src/servers/inet/minix3
+Only in /home/src/servers/inet/minix3: queryparam.o
+Only in /home/src/servers/inet: mnx_eth.o
+Only in /home/src/servers/inet: mq.o
+Only in /home/src/servers/inet: qp.o
+Only in /home/src/servers/inet: sha2.o
+Only in /home/src/servers/inet: sr.o
+Only in /home/src/servers/inet: stacktrace.o
+Common subdirectories: /usr/src/servers/init and /home/src/servers/init
+Only in /home/src/servers/init: init
+Only in /home/src/servers/init: init.o
+Common subdirectories: /usr/src/servers/is and /home/src/servers/is
+Only in /home/src/servers/is: dmp.o
+Only in /home/src/servers/is: dmp_ds.o
+Only in /home/src/servers/is: dmp_fs.o
+Only in /home/src/servers/is: dmp_kernel.o
+Only in /home/src/servers/is: dmp_pm.o
+Only in /home/src/servers/is: dmp_rs.o
+Only in /home/src/servers/is: is
+Only in /home/src/servers/is: main.o
+Common subdirectories: /usr/src/servers/pm and /home/src/servers/pm
+Only in /home/src/servers/pm: alloc.o
+Only in /home/src/servers/pm: break.o

@@ -1,0 +1,141 @@
+
+Table of contents
+=================
+1. Introduction
+2. Testing the patch
+3. Objectives and Approach
+
+
+Introduction
+============
+
+This is a patch for demonstrating the implementation of
+the Ctrl-W keyboard shortcut for the Minix tty driver, which
+deletes the entire last word in the terminal when pressed.
+For a more detailed description on the changed code see 3.
+Approach.
+
+
+Testing the patch
+=================
+
+To apply the patch, type
+
+  patch -p0 < name_of_patch.patch
+
+which should modify the tty driver source code in /usr/src.
+Once completed, compile the kernel at /usr/src/tools with
+
+  make install
+
+and reboot. The keyboard shortcut can be then be tested
+using 'cat' in the command line.
+
+  # cat (press Enter)
+  abc def ghi (press Ctrl-W)
+
+Note that if a previous patch that disables the bk_killword
+function in libedit has been applied, the key will not work
+in the shell. See 3. Approach.
+
+
+Objectives and Approach
+=======================
+
+This section intends to briefly explain how keyboard
+shortcuts work and how the Ctrl-W shortcut is implemented in
+this patch.
+
+When the keyboard driver receives an interrupt indicating a
+keypress has occured, it first checks for the key code
+pressed and then, depending on whether Ctrl, Shift and Alt
+has been previously pressed, determines whether the key is
+a system function key (i.e Ctrl-F1). Otherwise the keycode
+is passed to in_process of the tty driver.
+
+Inside in_process, tty checks for any terminal flags that
+may have been set. Here, we'll concentrate on ICANON
+(whether the terminal is in raw or cooked/canonical mode).
+By default canonical mode is enabled, which implies that
+keys are kept by tty in a buffer and not sent out to the
+reading user program immediately.
+
+Keyboard shortcuts are defined in <include/termios.h>, and
+set into the default termios.c_cc structure
+(tty.c line 146). The keys are recognized in octadecimal
+order, with '\1' representing Ctrl-A, and for Ctrl-W, '\27',
+which is saved in the TSWALLOW_DEF preprocessor macro, while
+VSWALLOW indicates where in c_cc would the code be saved.
+Note that in this patch the Ctrl-W key is defined directly
+in tty.c so as to skip the 'make install' step in
+src/include usually required to install include files.
+
+Back in in_process, tty compares the newly scanned keycode
+with the keyboard shortcut codes stored in termios.c_cc.
+In Ctrl-W case, it detects the key pressed '\27' has been
+defined in termios.c_cc[VSWALLOW] and calls swallow() at
+tty.c line 1256.
+
+Swallow() carries out the main processing for word deletion.
+Basically it checks the last character entered in the
+terminal, deletes it if it is an alphanumeric character,
+moves on to the character previous to last, and repeats as
+necessary until it comes to a non-alphanumeric character, or
+when it comes to a EOT (indicating end of a line), where at
+that point swallow() has deleted an entire line.
+
+Deleting a character is essentially no more than replacing
+the onscreen character as a whilespace (' ') and noting
+there is 1 less character saved in the tty buffer.
+
+So pressing Ctrl-W when we have
+
+  abc<space>def removes def
+  abc!def removes def
+  (abc)def removes def
+
+But wait, what if the last character is non-alphanumeric?
+For example,
+
+  abc<space>def<space><space><space>
+
+By basic reasoning, this would mean def never gets deleted!
+Thus, an additional check is required: Swallow() should
+always delete the last character whether or not it is alpha
+numeric, continue deleting until it comes to an alpha
+numeric, and finally switch back to our basic principle and
+continue deleting until it finally reaches a non-alpha
+numeric. So now:
+
+  abc<space>def<space><space><space> deletes def<space>
+  <space><space>
+  abc+def= deletes def=
+  (abc)def deletes def, pressing again deletes abc),
+  pressing again deletes (
+
+When it's done, processing returns to in_process, and tty
+may decide to echo the pressed key (^W in this case), and
+then moves on to the next keypress.
+
+Also should be explained is why this patch does not affect
+the shell. When the shell waits for commands to be entered
+in the command prompt, it calls readline() in the editline
+C library (libedit) to read characters from tty. While
+doing so, libedit disabled the terminal's ICANON flag,
+changing it to raw (non-canonical) mode.
+
+Firstly in this mode, swallow() does not get called in
+in_process.
+
+Secondly, libedit has its own keyboard shortcut for Ctrl-W
+defined (which actually has the very same function) where it
+calls bk_killword() to delete the last word. In the Minix
+installation that modifies this, the function is essentially
+crippled, so the shell quits when the key is pressed.
+
+Lastly shell sets the termios flags so that tty sends any
+characters it receives almost immediately. We won't have a
+line of characters to operate on, so swallow() wouldn't
+work. On the other hand it might still be possible to remedy
+this, but not without altering the termios structure, which
+is not in the scope of the patch.

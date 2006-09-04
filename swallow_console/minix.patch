@@ -1,0 +1,216 @@
+Only in /home/src/drivers/tty: console.o
+Only in /home/src/drivers/tty: keyboard.o
+Common subdirectories: /usr/src/drivers/tty/keymaps and /home/src/drivers/tty/keymaps
+Only in /home/src/drivers/tty/keymaps: french.map
+Only in /home/src/drivers/tty/keymaps: german.map
+Only in /home/src/drivers/tty/keymaps: italian.map
+Only in /home/src/drivers/tty/keymaps: japanese.map
+Only in /home/src/drivers/tty/keymaps: latin-am.map
+Only in /home/src/drivers/tty/keymaps: olivetti.map
+Only in /home/src/drivers/tty/keymaps: polish.map
+Only in /home/src/drivers/tty/keymaps: scandinavn.map
+Only in /home/src/drivers/tty/keymaps: spanish.map
+Only in /home/src/drivers/tty/keymaps: uk.map
+Only in /home/src/drivers/tty/keymaps: us-std.map
+Only in /home/src/drivers/tty/keymaps: us-swap.map
+Only in /home/src/drivers/tty: pty.o
+Only in /home/src/drivers/tty: rs232.o
+Only in /home/src/drivers/tty: tty
+diff -c /usr/src/drivers/tty/tty.c /home/src/drivers/tty/tty.c
+*** /usr/src/drivers/tty/tty.c Sat Oct 22 02:19:16 2005
+--- /home/src/drivers/tty/tty.c Thu May  4 17:35:16 2006
+***************
+*** 136,148 ****
+  #endif
+  #endif
+  
+  /* Default attributes. */
+  PRIVATE struct termios termios_defaults = {
+    TINPUT_DEF, TOUTPUT_DEF, TCTRL_DEF, TLOCAL_DEF, TSPEED_DEF, TSPEED_DEF,
+    {
+  	TEOF_DEF, TEOL_DEF, TERASE_DEF, TINTR_DEF, TKILL_DEF, TMIN_DEF,
+  	TQUIT_DEF, TTIME_DEF, TSUSP_DEF, TSTART_DEF, TSTOP_DEF,
+! 	TREPRINT_DEF, TLNEXT_DEF, TDISCARD_DEF,
+    },
+  };
+  PRIVATE struct winsize winsize_defaults;	/* = all zeroes */
+--- 136,154 ----
+  #endif
+  #endif
+  
++ /* ======== Assignment changes =================*/
++ #define TSWALLOW_DEF	'\27'	/* ^W */
++ #define VSWALLOW	14	/* cc_c[VSWALLOW] (^W) */
++ FORWARD _PROTOTYPE( void swallow, (tty_t *tp));
++ /* ============================================ */
++ 
+  /* Default attributes. */
+  PRIVATE struct termios termios_defaults = {
+    TINPUT_DEF, TOUTPUT_DEF, TCTRL_DEF, TLOCAL_DEF, TSPEED_DEF, TSPEED_DEF,
+    {
+  	TEOF_DEF, TEOL_DEF, TERASE_DEF, TINTR_DEF, TKILL_DEF, TMIN_DEF,
+  	TQUIT_DEF, TTIME_DEF, TSUSP_DEF, TSTART_DEF, TSTOP_DEF,
+! 	TREPRINT_DEF, TLNEXT_DEF, TDISCARD_DEF, TSWALLOW_DEF,
+    },
+  };
+  PRIVATE struct winsize winsize_defaults;	/* = all zeroes */
+***************
+*** 1052,1057 ****
+--- 1058,1073 ----
+  			continue;
+  		}
+  
++ 		/* Swallow processing (erases the entire last word) */
++ 		if (ch == tp->tty_termios.c_cc[VSWALLOW]) {
++ 			swallow(tp);
++ 			/* Pass keypress to terminal if echoing is enabled */
++ 			if (!(tp->tty_termios.c_lflag & ECHOE)) {
++ 				(void) tty_echo(tp, ch);
++ 			}
++ 			continue;
++ 		}
++ 
+  		/* EOF (^D) means end-of-file, an invisible "line break". */
+  		if (ch == tp->tty_termios.c_cc[VEOF]) ch |= IN_EOT | IN_EOF;
+  
+***************
+*** 1235,1279 ****
+  }
+  
+  /*===========================================================================*
+!  *				reprint					     *
+!  *===========================================================================*/
+! PRIVATE void reprint(tp)
+! register tty_t *tp;		/* pointer to tty struct */
+! {
+! /* Restore what has been echoed to screen before if the user input has been
+!  * messed up by output, or if REPRINT (^R) is typed.
+!  */
+!   int count;
+!   u16_t *head;
+! 
+!   tp->tty_reprint = FALSE;
+! 
+!   /* Find the last line break in the input. */
+!   head = tp->tty_inhead;
+!   count = tp->tty_incount;
+!   while (count > 0) {
+! 	if (head == tp->tty_inbuf) head = bufend(tp->tty_inbuf);
+! 	if (head[-1] & IN_EOT) break;
+! 	head--;
+! 	count--;
+!   }
+!   if (count == tp->tty_incount) return;		/* no reason to reprint */
+! 
+!   /* Show REPRINT (^R) and move to a new line. */
+!   (void) tty_echo(tp, tp->tty_termios.c_cc[VREPRINT] | IN_ESC);
+!   rawecho(tp, '\r');
+!   rawecho(tp, '\n');
+! 
+!   /* Reprint from the last break onwards. */
+!   do {
+! 	if (head == bufend(tp->tty_inbuf)) head = tp->tty_inbuf;
+! 	*head = tty_echo(tp, *head);
+! 	head++;
+! 	count++;
+!   } while (count < tp->tty_incount);
+  }
+  
+  /*===========================================================================*
+   *				out_process				     *
+   *===========================================================================*/
+  PUBLIC void out_process(tp, bstart, bpos, bend, icount, ocount)
+--- 1251,1341 ----
+  }
+  
+  /*===========================================================================*
+!  *				swallow				     *
+!  *===========================================================================*/
+! PRIVATE void swallow(tp)
+! register tty_t *tp;
+! {
+! /* Backspaces over the entire last word to erase it */
+!   u16_t *head;	/* the last character in queue */
+!   int len;	/* character length */
+!   int ch;	/* current character of queue */
+!   int flag = 0;	/* deletion controller flag */
+! 
+!   while (1) {
+! 	if (tp->tty_incount == 0) break;	/* queue is empty, exit function */
+! 	head = tp->tty_inhead;	/* get the last position in queue */
+! 	if (head == tp->tty_inbuf) head = bufend(tp->tty_inbuf);	/* realign pointer if at head of buffer */
+! 	if (*--head & IN_EOT) break;	/* move backwards for the actual last character, check if end of line */
+! 	ch = *head & IN_CHAR & ~IN_LEN;	/* apply bitmask to get character code */
+! 	/* check for non-alphanumeric */
+! 	if ((ch < 'a' || ch > 'z') &&
+! 		(ch < 'A' || ch > 'Z') &&
+! 		(ch < '0' || ch > '9')) 
+! 	{
+! 		/* not alphanumeric */
+! 		/* flag dictates we've deleted past at least 1 alphanumeric by now, we've done our job! */
+! 		if (flag == 1) break;
+! 	} else
+! 		/* is alpha numeric */
+! 		/* set flag to quit on next non-alphanum */
+! 		flag = 1;
+! 	if (tp->tty_reprint) reprint(tp);	/* reprint if messed up */
+! 	tp->tty_inhead = head;	/* realign queue head to our character */
+! 	tp->tty_incount--;	/* deleting 1 character, reduce inqueue character count */
+! 	/* if echoing is enabled */
+! 	if (tp->tty_termios.c_lflag & ECHOE) {
+! 		len = (*head & IN_LEN) >> IN_LSHIFT;	/* get character length */
+! 		while (len > 0) {
+! 			rawecho(tp, '\b');	/* move cursor back */
+! 			rawecho(tp, ' ');	/* whitespace to overwrite current onscreen char */
+! 			rawecho(tp, '\b');	/* move cursor back again */
+! 			len--;
+! 		}
+! 	}
+!   }
+  }
+  
+  /*===========================================================================*
++  *				reprint					     *
++  *===========================================================================*/
++ PRIVATE void reprint(tp)
++ register tty_t *tp;		/* pointer to tty struct */
++ {
++ /* Restore what has been echoed to screen before if the user input has been
++  * messed up by output, or if REPRINT (^R) is typed.
++  */
++   int count;
++   u16_t *head;
++ 
++   tp->tty_reprint = FALSE;
++ 
++   /* Find the last line break in the input. */
++   head = tp->tty_inhead;
++   count = tp->tty_incount;
++   while (count > 0) {
++ 	if (head == tp->tty_inbuf) head = bufend(tp->tty_inbuf);
++ 	if (head[-1] & IN_EOT) break;
++ 	head--;
++ 	count--;
++   }
++   if (count == tp->tty_incount) return;		/* no reason to reprint */
++ 
++   /* Show REPRINT (^R) and move to a new line. */
++   (void) tty_echo(tp, tp->tty_termios.c_cc[VREPRINT] | IN_ESC);
++   rawecho(tp, '\r');
++   rawecho(tp, '\n');
++ 
++   /* Reprint from the last break onwards. */
++   do {
++ 	if (head == bufend(tp->tty_inbuf)) head = tp->tty_inbuf;
++ 	*head = tty_echo(tp, *head);
++ 	head++;
++ 	count++;
++   } while (count < tp->tty_incount);
++ }
++ 
++ /*===========================================================================*
+   *				out_process				     *
+   *===========================================================================*/
+  PUBLIC void out_process(tp, bstart, bpos, bend, icount, ocount)
+Only in /home/src/drivers/tty: tty.o
+Only in /home/src/drivers/tty: vidcopy.o

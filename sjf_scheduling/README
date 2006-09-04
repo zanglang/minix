@@ -1,0 +1,89 @@
+
+Table of contents
+=================
+1. Introduction
+2. Kernel compiling notes
+3. Patch information
+4. Test information
+
+
+Introduction
+============
+
+This is a test program for demonstrating the Shortest Job
+First (SJF) scheduling algorithm using exponential averaging
+in Minix. Basically it spawns several child processes that
+calculates the MD5 hash of a randomly generated 65k length
+string multiple times, simulating heavy CPU use on a
+multithreaded operating system setup. Each child 'sleeps'
+for a different amount of time depending of their spawn
+order.
+
+
+Kernel compiling notes
+======================
+
+Before compiling the patched source code, the kernel
+Makefile requires 2 enviroment variables, the weighted
+average 'P_ALPHA' and default estimated burst 'P_TAU' set.
+This can be done with the command:
+
+  export P_ALPHA=[alpha] P_TAU=[tau]
+
+Wherein the [] does not need to be typed. For best results
+'alpha' should be between 0-1 and 'tau' should be around
+6-8.
+
+
+Patch information
+================
+
+The patch submitted for this assignment generally changes
+the multi-level feedback queue implementation to using SJF.
+While the multilevel queue structure is unchanged in order
+to give higher priority to kernel processes, any other
+process in the queue will be ordered according to their
+average CPU burst time.
+
+One additional change was to attach a hook to the keyboard
+key F8, in which it'll provide a verbose dump of processes
+currently within the queue. This will be used to inspect the
+sort order of processes within each queue level.
+
+Pressing F8 will print out a table similiar to the following:
+
+# Dumping scheduling queues (verbose)
+         Qno  Pno  Est  Ticks  Pname
+Queue 0:
+          1    -2    8    0    SYSTEM
+Queue 7:
+          1    13   10    9    SOME_PROCESS
+	  2    14   20    0    SOME_PROCESS
+Queue 15
+          1    -4    8    1    IDLE
+
+An explanation of the column titles is as follows:
+Qno = position in queue
+Pno = identification number of process 
+Est = estimated cpu burst this runtime
+Ticks = actual cpu burst last runtime
+Pname = name of process
+
+
+Test information
+================
+
+To start the test, unpack the tar file and type 'make'
+within the directory to compile it, then run by typing
+'./hash'.
+
+Immediately after this, by pressing F8 repeatedly (and very
+quickly) it is possible to observe how exponential averaging
+works. Note that estimated burst time ('Est') changes in
+relation to actual burst time ('Ticks').
+
+Observations:
+- Processes are always sorted in ascending order of 'Est'
+- Due to the nature of SJF, some instances of 'hash' with
+  higher 'Est' will be pushed to the back of the queue and
+  will have to wait for a long time for it's turn.

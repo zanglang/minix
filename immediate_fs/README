@@ -1,0 +1,90 @@
+
+Table of contents
+=================
+1. Introduction
+2. Objectives and Approach
+3. Compiling and Testing
+4. Known Problems
+
+Introduction
+============
+
+This is a patch that introduces the functionality of
+immediate files into the Minix filesystem server (fs).
+
+
+Approach
+========
+
+Immediate files are file in which their data are stored in
+the inode structure directly instead of disk blocks. This
+will reduce disk accesses required to read or write a file.
+
+However, in order to introduce a new file type there needs
+to be a way to differentiate between regular and immediate
+files. Thus, the flag value '0120000' is used to set the
+i_mode fields of any immediate files.
+
+Both read and write calls the function read_write, thus
+there is a need to move data from regular disk blocks into
+izones when writing into immediate files, or vice versa,
+moving data from immediate files into regular disk blocks.
+When a file is first created it will have its type flag
+set to the immediate mode flag 0120000. Whenever an
+immediate file expands beyond 40 bytes it's immediate mode
+flag, as previously mentioned, must be unset.
+
+
+Compiling
+=========
+
+Apply the patch in /usr/src/servers with
+
+  patch -p0 < name_of_patch.patch
+
+and compile with
+
+  make install
+
+in /usr/src/tools. This should update the fs and pm servers
+with support for immediate files.
+
+
+Testing
+=======
+
+For known bugs that have not been solved with this patch,
+see Known Problems.
+
+After applying the patch, the implmentation may be tested
+using the following steps. First type
+
+  cat > test[press ENTER key]
+  [enter any 10 characters, ie 1234567890]
+  [press ENTER]
+  [press Ctrl-D]
+
+This should create a new file with approximately 11 bytes of
+characters. To check if it's an immediate file type
+  
+  stat test
+
+which should print out information about the file. Fields of
+note are the following:
+
+mode: 01200644
+size: 12
+
+As the flag to differentiate immediate files is the 2nd to 
+4th digit. Regular non-immediate files appear as 0100xxx,
+while immediate files appear as 01200xxx.
+
+
+Known Problems
+==============
+1. During booting some EFBIG errors stating 'file too big'
+   will be thrown.
+2. Upgrading from immediate files to regular files works
+   only partially. While the new data will be written
+   successfully, data previously saved in the inode will be
+   lost.
