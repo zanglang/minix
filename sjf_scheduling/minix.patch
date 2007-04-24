@@ -1,0 +1,537 @@
+diff -c /usr/src/kernel/Makefile /home/src/kernel/Makefile
+*** /usr/src/kernel/Makefile Wed Jul 20 15:25:37 2005
+--- /home/src/kernel/Makefile Thu Apr  6 21:19:51 2006
+***************
+*** 12,17 ****
+--- 12,18 ----
+  LD =	$(CC) -.o
+  CFLAGS = -I$i 
+  LDFLAGS = -i 
++ PFLAGS = -DP_ALPHA=$(P_ALPHA) -DP_TAU=$(P_TAU)
+  
+  HEAD =	mpx.o
+  OBJS =	start.o protect.o klib.o table.o main.o proc.o \
+***************
+*** 21,27 ****
+  
+  
+  # What to make.
+! all: build 
+  kernel build install: $(HEAD) $(OBJS) 
+  	cd system && $(MAKE) -$(MAKEFLAGS) $@
+  	$(LD) $(CFLAGS) $(LDFLAGS) -o kernel \
+--- 22,33 ----
+  
+  
+  # What to make.
+! all: test build 
+! 
+! # alpha and tau defines required
+! proc.o: proc.c
+! 	$(CC) -c $(LDFLAGS) $(PFLAGS) $(CFLAGS) $<	
+! 
+  kernel build install: $(HEAD) $(OBJS) 
+  	cd system && $(MAKE) -$(MAKEFLAGS) $@
+  	$(LD) $(CFLAGS) $(LDFLAGS) -o kernel \
+***************
+*** 37,42 ****
+--- 43,57 ----
+  	cd system && $(MAKE) -$(MAKEFLAGS) $@
+  	/usr/bin/mkdep "$(CC) -E $(CPPFLAGS)" *.c *.s > .depend
+  
++ # Check if alpha and tau are set
++ test:
++ 	@if test -z '$(P_ALPHA)' || test -z '$(P_TAU)' ; then \
++ 	  echo Remember to set relative weight \'P_ALPHA\' and \
++ 	    default estimated burst \'P_TAU\' first, i.e \'export \
++ 	    P_ALPHA=0.5 P_TAU=8\' ; \
++ 	  exit 1; \
++ 	fi
++ 
+  # Include generated dependencies.
+  klib.o:	klib386.s klib88.s
+  mpx.o:	mpx386.s mpx88.s
+diff -c /usr/src/kernel/clock.c /home/src/kernel/clock.c
+*** /usr/src/kernel/clock.c Sun Oct  9 19:58:25 2005
+--- /home/src/kernel/clock.c Thu Apr  6 21:19:52 2006
+***************
+*** 199,208 ****
+--- 199,212 ----
+    proc_ptr->p_user_time += ticks;
+    if (priv(proc_ptr)->s_flags & PREEMPTIBLE) {
+        proc_ptr->p_ticks_left -= ticks;
++ 	  /* store ticks used for user process */
++ 	  proc_ptr->p_ticks_used += ticks;
+    }
+    if (! (priv(proc_ptr)->s_flags & BILLABLE)) {
+        bill_ptr->p_sys_time += ticks;
+        bill_ptr->p_ticks_left -= ticks;
++ 	  /* store ticks used for billable process */
++ 	  bill_ptr->p_ticks_used += ticks;
+    }
+  
+    /* Check if do_clocktick() must be called. Done for alarms and scheduling.
+diff -c /usr/src/kernel/config.h /home/src/kernel/config.h
+*** /usr/src/kernel/config.h Sun Sep 11 16:44:06 2005
+--- /home/src/kernel/config.h Thu Apr  6 21:19:56 2006
+***************
+*** 79,83 ****
+  #define DEBUG_LOCK_CHECK   0	/* kernel lock() sanity check */
+  #define DEBUG_TIME_LOCKS   0	/* measure time spent in locks */
+  
+! #endif /* CONFIG_H */
+! 
+--- 79,90 ----
+  #define DEBUG_LOCK_CHECK   0	/* kernel lock() sanity check */
+  #define DEBUG_TIME_LOCKS   0	/* measure time spent in locks */
+  
+! #ifndef P_ALPHA
+!   #define P_ALPHA	0.5	/* alpha constant used in burst time estimate */
+! #endif
+! #ifndef P_TAU
+!   #define P_TAU	8	/* tau/burst time estimated for process first run */
+! #endif
+! 
+! #endif /* CONFIG_H */
+! 
+diff -c /usr/src/kernel/main.c /home/src/kernel/main.c
+*** /usr/src/kernel/main.c Sat Oct 22 01:12:38 2005
+--- /home/src/kernel/main.c Thu Apr  6 21:19:53 2006
+***************
+*** 77,82 ****
+--- 77,84 ----
+  	rp->p_priority = ip->priority;		/* current priority */
+  	rp->p_quantum_size = ip->quantum;	/* quantum size in ticks */
+  	rp->p_ticks_left = ip->quantum;		/* current credit */
++ 	rp->p_estimate = 0;					/* estimated ticks */
++ 	rp->p_ticks_used = 0;				/* actual ticks used */
+  	strncpy(rp->p_name, ip->proc_name, P_NAME_LEN); /* set process name */
+  	(void) get_priv(rp, (ip->flags & SYS_PROC));    /* assign structure */
+  	priv(rp)->s_flags = ip->flags;			/* process flags */
+diff -c /usr/src/kernel/proc.c /home/src/kernel/proc.c
+*** /usr/src/kernel/proc.c Thu Oct 20 20:59:02 2005
+--- /home/src/kernel/proc.c Thu Apr  6 21:19:55 2006
+***************
+*** 54,60 ****
+  		register struct proc *caller, int src_dst));
+  FORWARD _PROTOTYPE( void enqueue, (struct proc *rp));
+  FORWARD _PROTOTYPE( void dequeue, (struct proc *rp));
+- FORWARD _PROTOTYPE( void sched, (struct proc *rp, int *queue, int *front));
+  FORWARD _PROTOTYPE( void pick_proc, (void));
+  
+  #define BuildMess(m_ptr, src, dst_ptr) \
+--- 54,59 ----
+***************
+*** 460,508 ****
+    return(result);
+  }
+  
+! /*===========================================================================*
+!  *				enqueue					     * 
+!  *===========================================================================*/
+! PRIVATE void enqueue(rp)
+! register struct proc *rp;	/* this process is now runnable */
+! {
+! /* Add 'rp' to one of the queues of runnable processes.  This function is 
+!  * responsible for inserting a process into one of the scheduling queues. 
+!  * The mechanism is implemented here.   The actual scheduling policy is
+!  * defined in sched() and pick_proc().
+!  */
+!   int q;	 				/* scheduling queue to use */
+!   int front;					/* add to front or back */
+! 
+! #if DEBUG_SCHED_CHECK
+!   check_runqueues("enqueue");
+!   if (rp->p_ready) kprintf("enqueue() already ready process\n");
+! #endif
+! 
+!   /* Determine where to insert to process. */
+!   sched(rp, &q, &front);
+! 
+!   /* Now add the process to the queue. */
+!   if (rdy_head[q] == NIL_PROC) {		/* add to empty queue */
+!       rdy_head[q] = rdy_tail[q] = rp; 		/* create a new queue */
+!       rp->p_nextready = NIL_PROC;		/* mark new end */
+!   } 
+!   else if (front) {				/* add to head of queue */
+!       rp->p_nextready = rdy_head[q];		/* chain head of queue */
+!       rdy_head[q] = rp;				/* set new queue head */
+!   } 
+!   else {					/* add to tail of queue */
+!       rdy_tail[q]->p_nextready = rp;		/* chain tail of queue */	
+!       rdy_tail[q] = rp;				/* set new queue tail */
+!       rp->p_nextready = NIL_PROC;		/* mark new end */
+!   }
+! 
+!   /* Now select the next process to run. */
+!   pick_proc();			
+! 
+! #if DEBUG_SCHED_CHECK
+!   rp->p_ready = 1;
+!   check_runqueues("enqueue");
+  #endif
+  }
+  
+--- 459,522 ----
+    return(result);
+  }
+  
+! /*======================== new enqueue function ==========================*/
+! 
+! PRIVATE void enqueue(rp)
+! register struct proc *rp;	/* process to be queued */
+! {
+! 	/* temporary pointers */
+! 	struct proc *curp;	/* current node */
+! 	struct proc *prevp;	/* node before */
+! 
+! 	/* give new quantum if ticks left were exhausted */
+! 	if (rp->p_ticks_left <= 0)
+! 		rp->p_ticks_left = rp->p_quantum_size;
+! 
+! 	/* if the process is run for the first time there is no record of previous */
+! 	/* run time, thus we'll assign it a predefined tau */
+! 	if (rp->p_estimate == 0)
+! 		rp->p_estimate = P_TAU;
+! 	else
+! 		/* estimated burst time using exponential average */
+! 		rp->p_estimate = (char)(P_ALPHA * rp->p_ticks_used + (1. - P_ALPHA) * rp->p_estimate);
+! 	
+! 	/* reset ticks count */
+! 	rp->p_ticks_used = 0;
+! 
+! 	/* get queue to insert */
+! 	curp = rdy_head[rp->p_priority];
+! 	prevp = NIL_PROC;
+! 
+! 	/* now, iterate through linked list and find a slot to insert the process */
+! 	/* keep moving as long as the current process has a higher tick count */
+! 	while (curp != NIL_PROC && rp->p_estimate > curp->p_estimate) {
+! 		prevp = curp;
+! 		curp = curp->p_nextready;
+! 	}
+! 
+! 	/* queue is empty, replace head and tail */
+! 	if (curp == rdy_head[rp->p_priority])
+! 		rdy_head[rp->p_priority] = rdy_tail[rp->p_priority] = rp;
+! 	/* or we've found a slot */
+! 	else {
+! 		prevp->p_nextready = rp;
+! 		/* check for tail */
+! 		if (prevp == rdy_tail[rp->p_priority])
+! 			rdy_tail[rp->p_priority] = rp;
+! 	}
+! 
+! 	/* link this process to the next in queue */
+! 	rp->p_nextready = curp;
+! 
+! 	/* Now select the next process to run. */
+! 	pick_proc();			
+! 
+! #if DEBUG_SCHED_CHECK
+! 	rp->p_ready = 1;
+! 	check_runqueues("enqueue");
+  #endif
+  }
+  
+***************
+*** 556,662 ****
+  }
+  
+  /*===========================================================================*
+!  *				sched					     * 
+!  *===========================================================================*/
+! PRIVATE void sched(rp, queue, front)
+! register struct proc *rp;			/* process to be scheduled */
+! int *queue;					/* return: queue to use */
+! int *front;					/* return: front or back */
+! {
+! /* This function determines the scheduling policy.  It is called whenever a
+!  * process must be added to one of the scheduling queues to decide where to
+!  * insert it.  As a side-effect the process' priority may be updated.  
+!  */
+!   static struct proc *prev_ptr = NIL_PROC;	/* previous without time */
+!   int time_left = (rp->p_ticks_left > 0);	/* quantum fully consumed */
+!   int penalty = 0;				/* change in priority */
+! 
+!   /* Check whether the process has time left. Otherwise give a new quantum 
+!    * and possibly raise the priority.  Processes using multiple quantums 
+!    * in a row get a lower priority to catch infinite loops in high priority
+!    * processes (system servers and drivers). 
+!    */
+!   if ( ! time_left) {				/* quantum consumed ? */
+!       rp->p_ticks_left = rp->p_quantum_size; 	/* give new quantum */
+!       if (prev_ptr == rp) penalty ++;		/* catch infinite loops */
+!       else penalty --; 				/* give slow way back */
+!       prev_ptr = rp;				/* store ptr for next */
+!   }
+! 
+!   /* Determine the new priority of this process. The bounds are determined
+!    * by IDLE's queue and the maximum priority of this process. Kernel task 
+!    * and the idle process are never changed in priority.
+!    */
+!   if (penalty != 0 && ! iskernelp(rp)) {
+!       rp->p_priority += penalty;		/* update with penalty */
+!       if (rp->p_priority < rp->p_max_priority)  /* check upper bound */ 
+!           rp->p_priority=rp->p_max_priority;
+!       else if (rp->p_priority > IDLE_Q-1)   	/* check lower bound */
+!       	  rp->p_priority = IDLE_Q-1;
+!   }
+! 
+!   /* If there is time left, the process is added to the front of its queue, 
+!    * so that it can immediately run. The queue to use simply is always the
+!    * process' current priority. 
+!    */
+!   *queue = rp->p_priority;
+!   *front = time_left;
+  }
+  
+  /*===========================================================================*
+!  *				pick_proc				     * 
+!  *===========================================================================*/
+! PRIVATE void pick_proc()
+! {
+! /* Decide who to run now.  A new process is selected by setting 'next_ptr'.
+!  * When a billable process is selected, record it in 'bill_ptr', so that the 
+!  * clock task can tell who to bill for system time.
+!  */
+!   register struct proc *rp;			/* process to run */
+!   int q;					/* iterate over queues */
+! 
+!   /* Check each of the scheduling queues for ready processes. The number of
+!    * queues is defined in proc.h, and priorities are set in the task table.
+!    * The lowest queue contains IDLE, which is always ready.
+!    */
+!   for (q=0; q < NR_SCHED_QUEUES; q++) {	
+!       if ( (rp = rdy_head[q]) != NIL_PROC) {
+!           next_ptr = rp;			/* run process 'rp' next */
+!           if (priv(rp)->s_flags & BILLABLE)	 	
+!               bill_ptr = rp;			/* bill for system time */
+!           return;				 
+!       }
+!   }
+  }
+  
+  /*===========================================================================*
+!  *				lock_send				     *
+!  *===========================================================================*/
+! PUBLIC int lock_send(dst, m_ptr)
+! int dst;			/* to whom is message being sent? */
+! message *m_ptr;			/* pointer to message buffer */
+! {
+! /* Safe gateway to mini_send() for tasks. */
+!   int result;
+!   lock(2, "send");
+!   result = mini_send(proc_ptr, dst, m_ptr, NON_BLOCKING);
+!   unlock(2);
+!   return(result);
+  }
+  
+  /*===========================================================================*
+-  *				lock_enqueue				     *
+-  *===========================================================================*/
+- PUBLIC void lock_enqueue(rp)
+- struct proc *rp;		/* this process is now runnable */
+- {
+- /* Safe gateway to enqueue() for tasks. */
+-   lock(3, "enqueue");
+-   enqueue(rp);
+-   unlock(3);
+- }
+- 
+- /*===========================================================================*
+   *				lock_dequeue				     *
+   *===========================================================================*/
+  PUBLIC void lock_dequeue(rp)
+--- 570,628 ----
+  }
+  
+  /*===========================================================================*
+!  *				pick_proc				     * 
+!  *===========================================================================*/
+! PRIVATE void pick_proc()
+! {
+! /* Decide who to run now.  A new process is selected by setting 'next_ptr'.
+!  * When a billable process is selected, record it in 'bill_ptr', so that the 
+!  * clock task can tell who to bill for system time.
+!  */
+!   register struct proc *rp;			/* process to run */
+!   int q;					/* iterate over queues */
+! 
+!   /* Check each of the scheduling queues for ready processes. The number of
+!    * queues is defined in proc.h, and priorities are set in the task table.
+!    * The lowest queue contains IDLE, which is always ready.
+!    */
+!   for (q=0; q < NR_SCHED_QUEUES; q++) {	
+!       if ( (rp = rdy_head[q]) != NIL_PROC) {
+!           next_ptr = rp;			/* run process 'rp' next */
+!           if (priv(rp)->s_flags & BILLABLE)	 	
+!               bill_ptr = rp;			/* bill for system time */
+!           return;				 
+!       }
+!   }
+  }
+  
+  /*===========================================================================*
+!  *				lock_send				     *
+!  *===========================================================================*/
+! PUBLIC int lock_send(dst, m_ptr)
+! int dst;			/* to whom is message being sent? */
+! message *m_ptr;			/* pointer to message buffer */
+! {
+! /* Safe gateway to mini_send() for tasks. */
+!   int result;
+!   lock(2, "send");
+!   result = mini_send(proc_ptr, dst, m_ptr, NON_BLOCKING);
+!   unlock(2);
+!   return(result);
+  }
+  
+  /*===========================================================================*
+!  *				lock_enqueue				     *
+!  *===========================================================================*/
+! PUBLIC void lock_enqueue(rp)
+! struct proc *rp;		/* this process is now runnable */
+! {
+! /* Safe gateway to enqueue() for tasks. */
+!   lock(3, "enqueue");
+!   enqueue(rp);
+!   unlock(3);
+  }
+  
+  /*===========================================================================*
+   *				lock_dequeue				     *
+   *===========================================================================*/
+  PUBLIC void lock_dequeue(rp)
+diff -c /usr/src/kernel/proc.h /home/src/kernel/proc.h
+*** /usr/src/kernel/proc.h Fri Sep 30 12:54:59 2005
+--- /home/src/kernel/proc.h Thu Apr  6 21:19:57 2006
+***************
+*** 53,58 ****
+--- 53,65 ----
+  
+    char p_name[P_NAME_LEN];	/* name of the process, including \0 */
+  
++ /*============= struct process changes =================*/
++ 
++   char p_estimate;		/* estimated ticks required for this instance */
++   char p_ticks_used;	/* number of scheduling ticks used last run */
++ 
++ /*=================================================================*/
++ 
+  #if DEBUG_SCHED_CHECK
+    int p_ready, p_found;
+  #endif
+Common subdirectories: /usr/src/kernel/system and /home/src/kernel/system
+diff -c /usr/src/servers/is/dmp.c /home/src/servers/is/dmp.c
+*** /usr/src/servers/is/dmp.c Thu Oct 20 20:28:54 2005
+--- /home/src/servers/is/dmp.c Thu Apr  6 21:20:01 2006
+***************
+*** 12,18 ****
+  /* Define hooks for the debugging dumps. This table maps function keys
+   * onto a specific dump and provides a description for it.
+   */
+! #define NHOOKS 19
+  
+  struct hook_entry {
+  	int key;
+--- 12,19 ----
+  /* Define hooks for the debugging dumps. This table maps function keys
+   * onto a specific dump and provides a description for it.
+   */
+! /* was 19, increased to 20 to accomodate new schedule dump */
+! #define NHOOKS 20
+  
+  struct hook_entry {
+  	int key;
+***************
+*** 26,31 ****
+--- 27,33 ----
+  	{ F5,	monparams_dmp, "Boot monitor parameters" },
+  	{ F6,	irqtab_dmp, "IRQ hooks and policies" },
+  	{ F7,	kmessages_dmp, "Kernel messages" },
++ 	{ F8,	sched_dmp_new, "Scheduling queues verbose" },
+  	{ F9,	sched_dmp, "Scheduling queues" },
+  	{ F10,	kenv_dmp, "Kernel parameters" },
+  	{ F11,	timing_dmp, "Timing details (if enabled)" },
+diff -c /usr/src/servers/is/dmp_kernel.c /home/src/servers/is/dmp_kernel.c
+*** /usr/src/servers/is/dmp_kernel.c Thu Oct 20 20:28:54 2005
+--- /home/src/servers/is/dmp_kernel.c Thu Apr  6 21:19:59 2006
+***************
+*** 255,260 ****
+--- 255,316 ----
+  }
+  
+  /*===========================================================================*
++  *	sched_dmp_new - provide a more verbose dump of the queue *
++  *===========================================================================*/
++ PUBLIC void sched_dmp_new()
++ {
++   struct proc *rdy_head[NR_SCHED_QUEUES];
++   struct kinfo kinfo;
++   register struct proc *rp;
++   vir_bytes ptr_diff;
++   int p, r;
++ 
++   /* First obtain a scheduling information. */
++   if ((r = sys_getschedinfo(proc, rdy_head)) != OK) {
++       report("IS","warning: couldn't get copy of process table", r);
++       return;
++   }
++   /* Then obtain kernel addresses to correct pointer information. */
++   if ((r = sys_getkinfo(&kinfo)) != OK) {
++       report("IS","warning: couldn't get kernel addresses", r);
++       return;
++   }
++ 
++   /* Update all pointers. Nasty pointer algorithmic ... */
++   ptr_diff = (vir_bytes) proc - (vir_bytes) kinfo.proc_addr;
++   for (r=0;r<NR_SCHED_QUEUES; r++)
++       if (rdy_head[r] != NIL_PROC)
++           rdy_head[r] = 
++               (struct proc *)((vir_bytes) rdy_head[r] + ptr_diff);
++   for (rp=BEG_PROC_ADDR; rp < END_PROC_ADDR; rp++)
++       if (rp->p_nextready != NIL_PROC)
++           rp->p_nextready =
++                (struct proc *)((vir_bytes) rp->p_nextready + ptr_diff);
++ 
++   /* Now show scheduling queues. */
++   printf("Dumping scheduling queues (verbose).\n");
++   printf("\tQno\tPno\tEst\tTicks\tPname\n");
++ 
++   /* Qno: number of priority queue process is in
++    * Pno: identification number of process 
++    * Est: estimated cpu burst this runtime
++    * Ticks: actual cpu burst last runtime
++    * Pname: name of process */
++ 
++   for (r=0;r<NR_SCHED_QUEUES; r++) {
++ 	  rp = rdy_head[r];
++       if (!rp) continue;
++ 	  printf("Queue %d:\n", r);
++       for (p = 1; rp != NIL_PROC; p++) {
++           printf("\t%4d:\t%4d\t%4d\t%4d\t%s\n", p, rp->p_nr, rp->p_estimate, rp->p_ticks_used, rp->p_name);
++           rp = rp->p_nextready;
++       }
++       printf("\n");
++   }
++   printf("\n");
++ }
++ 
++ /*===========================================================================*
+   *				kenv_dmp				     *
+   *===========================================================================*/
+  PUBLIC void kenv_dmp()
+diff -c /usr/src/servers/is/proto.h /home/src/servers/is/proto.h
+*** /usr/src/servers/is/proto.h Thu Oct 20 20:28:54 2005
+--- /home/src/servers/is/proto.h Thu Apr  6 21:20:00 2006
+***************
+*** 17,22 ****
+--- 17,23 ----
+  _PROTOTYPE( void irqtab_dmp, (void)					);
+  _PROTOTYPE( void kmessages_dmp, (void)					);
+  _PROTOTYPE( void sched_dmp, (void)					);
++ _PROTOTYPE( void sched_dmp_new, (void)					);
+  _PROTOTYPE( void monparams_dmp, (void)					);
+  _PROTOTYPE( void kenv_dmp, (void)					);
+  _PROTOTYPE( void timing_dmp, (void)					);
